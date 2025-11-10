@@ -1,4 +1,5 @@
 ﻿using UnityEngine;
+using Cinemachine;
 #if ENABLE_INPUT_SYSTEM
 using UnityEngine.InputSystem;
 #endif
@@ -64,14 +65,23 @@ namespace StarterAssets
 		private float _jumpTimeoutDelta;
 		private float _fallTimeoutDelta;
 
-	
+		// FOV (sprint) - Cinemachine-aware
+		[Header("Field of View")]
+		[Tooltip("Target FOV while sprinting")]
+		public float SprintFOV = 75f;
+		[Tooltip("How fast the FOV interpolates")]
+		public float FOVChangeSpeed = 8f;
+		[Tooltip("Optional: assign the Cinemachine vcam to control directly. If left empty the first vcam found will be used.")]
+		public CinemachineVirtualCamera CinemachineVcam;
+
 #if ENABLE_INPUT_SYSTEM
 		private PlayerInput _playerInput;
 #endif
 		private CharacterController _controller;
 		private StarterAssetsInputs _input;
 		private GameObject _mainCamera;
-
+		private Camera _fallbackCamera; // used when Cinemachine vcam is not available
+		private float _baseFOV;
 		private const float _threshold = 0.01f;
 
 		private bool IsCurrentDeviceMouse
@@ -105,6 +115,46 @@ namespace StarterAssets
 			Debug.LogError( "Starter Assets package is missing dependencies. Please use Tools/Starter Assets/Reinstall Dependencies to fix it");
 #endif
 
+			// Cinemachine vcam setup: prefer inspector reference, otherwise try to find a matching/first vcam.
+			if (CinemachineVcam == null)
+				{
+#if UNITY_2023_2_OR_NEWER
+				// New API: FindObjectsByType lets us decide sorting / include inactive. Faster when sorting not needed.
+				var allVcams = Object.FindObjectsByType<CinemachineVirtualCamera>(FindObjectsInactive.Exclude, FindObjectsSortMode.None);
+#else
+				// Fallback for older Unity versions
+				var allVcams = FindObjectsOfType<CinemachineVirtualCamera>();
+#endif
+				if (allVcams != null && allVcams.Length > 0)
+				{
+					// try to pick the vcam that follows or looks at our target
+					CinemachineVirtualCamera match = null;
+					if (CinemachineCameraTarget != null)
+					{
+						foreach (var v in allVcams)
+						{
+							if (v.Follow == CinemachineCameraTarget.transform || v.LookAt == CinemachineCameraTarget.transform)
+							{
+								match = v;
+								break;
+							}
+						}
+					}
+					CinemachineVcam = match != null ? match : allVcams[0];
+				}
+			}
+
+			// cache base FOV
+			if (CinemachineVcam != null)
+			{
+				_baseFOV = CinemachineVcam.m_Lens.FieldOfView;
+			}
+			else
+			{
+				_fallbackCamera = _mainCamera != null ? _mainCamera.GetComponent<Camera>() : Camera.main;
+				_baseFOV = _fallbackCamera != null ? _fallbackCamera.fieldOfView : 60f;
+			}
+
 			// reset our timeouts on start
 			_jumpTimeoutDelta = JumpTimeout;
 			_fallTimeoutDelta = FallTimeout;
@@ -120,6 +170,7 @@ namespace StarterAssets
 		private void LateUpdate()
 		{
 			CameraRotation();
+			UpdateFOV();
 		}
 
 		private void GroundedCheck()
@@ -156,6 +207,24 @@ namespace StarterAssets
 
 				// rotate the player left and right
 				transform.Rotate(Vector3.up * _rotationVelocity);
+			}
+		}
+
+		// Smoothly adjust camera FOV when sprinting. Respects Cinemachine vcam if present.
+		private void UpdateFOV()
+		{
+			bool sprintingAndMoving = _input != null && _input.sprint && _input.move != Vector2.zero;
+			float targetFOV = sprintingAndMoving ? SprintFOV : _baseFOV;
+			float t = Time.deltaTime * FOVChangeSpeed;
+
+			if (CinemachineVcam != null)
+			{
+				float current = CinemachineVcam.m_Lens.FieldOfView;
+				CinemachineVcam.m_Lens.FieldOfView = Mathf.Lerp(current, targetFOV, t);
+			}
+			else if (_fallbackCamera != null)
+			{
+				_fallbackCamera.fieldOfView = Mathf.Lerp(_fallbackCamera.fieldOfView, targetFOV, t);
 			}
 		}
 
